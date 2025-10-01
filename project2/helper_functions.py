@@ -1,6 +1,6 @@
 import numpy as  np
 
-def gradient(f, x, h=1e-6):
+def gradient_approx(f, x, h=1e-6):
     n = len(x)
 
     grad = np.zeros(n)

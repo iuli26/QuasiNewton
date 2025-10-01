@@ -1,13 +1,9 @@
 import numpy as np
-from helper_functions import gradient, Hessian
+# from helper_functions import gradient_approx, Hessian
 from numpy.linalg import inv, norm
 from scipy.linalg import cholesky
 
 def is_pos_def(A):
-
-    """
-    checks if a matrix is positive definite
-    """
     try:
         _ = cholesky(A, lower=True)
         return True
@@ -17,10 +13,39 @@ def is_pos_def(A):
 class Problem:
     def __init__(self, obj_func, derivative):
         self.f = obj_func
-        self.df = derivative
+        self.df = derivative if derivative is not None else self.gradient_approx
+        self.hess = self.Hessian
+    
+    def gradient_approx(self, x, h=1e-6):
+        n = len(x)
+        grad = np.zeros(n)
+        for j in range(n):
+            dx = np.zeros(n)
+            dx[j] = h
+            grad[j] = (self.f(x+dx) - self.f(x-dx))/(2*h)
+        return grad
+    
+    def Hessian(self, x, h=1e-6):
+
+        n = len(x)
+        hess = np.zeros((n, n))
+        for j in range (n):
+            dxj = np.zeros(n)
+            dxj[j] = h
+            for k in range(n):
+                dxk = np.zeros(n)
+                dxk[k] = h
+                hess[j][k] = 1/(4*h**2) * (self.f(x+dxj+dxk) - self.f(x - dxk + dxj) - self.f(x+dxk-dxj) + self.f(x-dxk-dxj))
+
+        hess = 0.5 * (hess + hess.T)
+        return hess
 
 
 class Optimization_method:
+
+    """
+    General Optimization class that does the 'optimization process' aka updating the x
+    """
     def __init__(self, problem, x0, alpha0, tol, line_search, max_iterations=5000):
         self.max_iterations = max_iterations
         self.tol = tol
@@ -29,10 +54,12 @@ class Optimization_method:
         self.df = problem.df
         self.alpha = alpha0
         self.line_search = line_search
+        self.prob_class = problem
+        self.hess = problem.hess
 
         self.history = None
         self.it = 0
-
+    
 
     def step(self):
         pass
@@ -40,14 +67,11 @@ class Optimization_method:
     def optimization_process(self):
         self.history = [self.x.copy()]     # an array that keeps track of the solution evolution
         for k in range(self.max_iterations):
-            #print (f"\n=== Newton iteration {k+1} ===")
             s = self.step()
             self.x += self.alpha*s
-
-            #print(self.x)
             self.history.append(self.x.copy())
 
-            if norm(s) < self.tol or norm(gradient(self.f, self.x)) < self.tol:
+            if norm(s) < self.tol or norm(self.df(self.x)) < self.tol:
                 print("Our optimization terminated.")
                 break
             self.it += 1
@@ -61,6 +85,11 @@ class Optimization_method:
 
 class Newtons_method(Optimization_method):
 
+    """
+    Newton's method (derived from the Optimization class)
+
+    """
+
     def __init__(self, problem, x0, alpha0, tol, line_search):
         super().__init__(problem, x0, alpha0, tol, line_search)
 
@@ -70,16 +99,12 @@ class Newtons_method(Optimization_method):
         return self.f(self.x + alpha*self.s)
 
     def d_phi(self, alpha):
-        return np.dot(gradient(self.f, self.x+alpha*self.s), self.s)
+        return np.dot(self.df( self.x+alpha*self.s), self.s)
 
     def step(self):
 
-        if self.df != None:
-            g = self.df(self.x)
-        else:
-            g = gradient(self.f, self.x)
-        G = Hessian(self.f, self.x)
-
+        g = self.df(self.x)
+        G = self.hess(self.x)
 
         self.s = -inv(G)@g
         if np.dot(g, self.s) > 0:
@@ -87,36 +112,47 @@ class Newtons_method(Optimization_method):
             while np.dot(g, self.s) > 0:
                 random_step = tau * np.random.uniform (-1, 1, size=self.s.shape)
                 self.x += random_step
-                g = gradient(self.f, self.x)
-                G = Hessian(self.f, self.x)
+                g = self.df( self.x)
+                G = self.hess(self.x)
                 self.s = -inv(G) @ g
 
-        if self.line_search == 'exact': self.alpha = self.exact_line_search()
+        if self.line_search == 'exact': self.alpha = self.exact_line_search(self.prob_class, self.x, self.s)
         elif self.line_search == 'inexact': self.alpha = self.inexact_line_search()
         else: self.alpha = 1
 
         return self.s
 
 
-    def exact_line_search(self):
-        """
-            basically another newton for minimizing f(x + alpha*s) with respect to alpha, where I computed g0 and G0 form by hand (pen and paper)
+    def exact_line_search(self, problem, x, p, tol=1e-10, max_iter=60, max_expand=20):
+        x = np.asarray(x, dtype=float)
+        p = np.asarray(p, dtype=float)
 
-        return: alpha minimizer
-        """
-        alpha = self.alpha
-        for k in range(self.max_iterations):
-            #print("     line_search iteration:", k)
-            g0 = np.dot(gradient(self.f, self.x+alpha*self.s), self.s)    ### <=> gradient(self.f, self.x).T @ self.s
-            G0 = np.dot(self.s, Hessian(self.f, self.x+alpha*self.s) @ self.s)
+        def dphi(a: float) -> float:
+            return float(np.dot(self.df(x + a * p), p))
 
-            s0 = - g0/G0  # since both are scalars
-            alpha += s0
-            #print("         alpha: ", alpha)
-            if abs(s0) < self.tol:
+        a0, a1 = 0.0, 1.0
+        f0, f1 = dphi(a0), dphi(a1)
+
+        for _ in range(max_expand):
+            if f0 * f1 <= 0.0:
                 break
+            a1 *= 2.0
+            f1 = dphi(a1)
 
-        return alpha
+        if f0 * f1 > 0.0:
+            return 1.0  
+
+        lo, hi = (a0, a1) if f0 < 0.0 else (a1, a0)
+        for _ in range(max_iter):
+            mid = 0.5 * (lo + hi)
+            fm = dphi(mid)
+            if abs(fm) <= tol:
+                return mid
+            if fm > 0.0:
+                hi = mid
+            else:
+                lo = mid
+        return 0.5 * (lo + hi)
 
 
     def inexact_line_search(self):
@@ -149,21 +185,23 @@ class Newtons_method(Optimization_method):
 
 
 class Quasi_Newton(Newtons_method):
+
+    """
+    Quasi-Newton class derived fron Newton class
+    """
     def __init__(self, problem, x0, alpha0, tol, line_search):
         super ().__init__ (problem, x0, alpha0, tol, line_search)
 
-        self.H = inv(Hessian(self.f, x0))
-        print("Is the first Hessian positive definite?", is_pos_def(Hessian(self.f, x0)))
+        self.H = np.eye(len(x0), dtype=float)
+        print("Is the first Hessian positive definite?", is_pos_def(self.H))
 
     def inverse_hess(self):
         pass
 
     def step(self):
 
-        if self.df != None:         ## if the Problem comes with an analytic gradient take that, if not approximate with the helping function gradient()
-           g = self.df(self.x)
-        else:
-           g = gradient(self.f, self.x)
+        g = self.df(self.x)
+
 
         if self.it > 0:
             self.H = self.inverse_hess()
@@ -174,10 +212,10 @@ class Quasi_Newton(Newtons_method):
             #print ("NOT descent direction")
             self.s = -g
 
-            # Alternative: Take a small random step until we get a descent direction
-            #tau = .1
+        #     # Alternative: Take a small random step until we get a descent direction
+            # tau = .1
             # while np.dot(g, self.s) > 0:
-            #
+            
             #     random_step = tau * np.random.uniform (-1, 1, size=self.s.shape)
             #     self.x += random_step
             #     g = gradient (self.f, self.x)
@@ -185,7 +223,7 @@ class Quasi_Newton(Newtons_method):
             #     self.s = -1 * self.H @ g
 
 
-        if self.line_search == 'exact': self.alpha = self.exact_line_search()
+        if self.line_search == 'exact': self.alpha = self.exact_line_search(self.prob_class, self.x, self.s)
         elif self.line_search == 'inexact': self.alpha = self.inexact_line_search()
         else: self.alpha = 1
 
@@ -196,9 +234,6 @@ class Quasi_Newton(Newtons_method):
 class Good_Broyden(Quasi_Newton):
     def __init__(self, problem, x0, alpha0, tol, line_search):
         super ().__init__ (problem, x0, alpha0, tol, line_search)
-        #self.s = None  #### need?
-        self.H = inv(Hessian(self.f, x0))
-
 
     def inverse_hess(self):
 
@@ -208,7 +243,7 @@ class Good_Broyden(Quasi_Newton):
             print("Ai belit-o")
         else:
             x_prev, x_curr = self.history[-2], self.history[-1]
-            g_prev, g_curr = gradient(self.f, x_prev), gradient(self.f, x_curr)
+            g_prev, g_curr = self.df( x_prev), self.df( x_curr)
 
             gamma = g_curr - g_prev
             delta = x_curr - x_prev
@@ -224,10 +259,11 @@ class Good_Broyden(Quasi_Newton):
 
             return H_curr
 
+
 class Bad_Broyden(Quasi_Newton):
     def __init__(self, problem, x0, alpha0, tol, line_search):
         super ().__init__ (problem, x0, alpha0, tol, line_search)
-
+        #self.H = inv(self.hess(self.x))
     def inverse_hess(self):
 
         H_prev = self.H.copy()
@@ -236,7 +272,7 @@ class Bad_Broyden(Quasi_Newton):
             print("Ai belit-o")
         else:
             x_prev, x_curr = self.history[-2], self.history[-1]
-            g_prev, g_curr = gradient(self.f, x_prev), gradient(self.f, x_curr)
+            g_prev, g_curr = self.df( x_prev), self.df( x_curr)
 
             gamma = g_curr - g_prev
             delta = x_curr - x_prev
@@ -265,7 +301,7 @@ class Symmetric_Broyden(Quasi_Newton):
             print("Ai belit-o")
         else:
             x_prev, x_curr = self.history[-2], self.history[-1]
-            g_prev, g_curr = gradient(self.f, x_prev), gradient(self.f, x_curr)
+            g_prev, g_curr = self.df( x_prev), self.df( x_curr)
 
             gamma = g_curr - g_prev
             delta = x_curr - x_prev
@@ -283,32 +319,32 @@ class DFP(Quasi_Newton):
     def __init__(self, problem, x0, alpha0, tol, line_search):
         super ().__init__ (problem, x0, alpha0, tol, line_search)
 
-        #self.s = None  #### need?
-        self.H = inv(Hessian(self.f, x0))
-
 
     def inverse_hess(self):
-
         H_prev = self.H.copy()
 
         if len (self.history) < 2:
             print("Ai belit-o")
         else:
             x_prev, x_curr = self.history[-2], self.history[-1]
-            g_prev, g_curr = gradient(self.f, x_prev), gradient(self.f, x_curr)
+            g_prev, g_curr = self.df( x_prev), self.df( x_curr)
 
-            gamma = g_curr - g_prev
-            delta = x_curr - x_prev
+            y = g_curr - g_prev
+            s = x_curr - x_prev
 
-            first_term = np.outer(delta, delta)/np.dot(delta, gamma)
-            denomitor = np.dot(gamma, H_prev@gamma)
-            #numerator = H_prev @ np.outer (gamma, gamma) @ H_prev
-            #numerator = np.outer(H_prev@gamma, gamma) @ H_prev
-            numerator = H_prev@np.outer(gamma, np.dot(gamma, H_prev))
-            second_term = numerator/denomitor
-            H_curr = H_prev + first_term - second_term
+            s = np.asarray(s).reshape(-1,1)
+            y = np.asarray(y).reshape(-1,1)
 
-            return H_curr
+            Hy = H_prev @ y
+
+            denom1 = s.T @ y        
+            denom2 = y.T @ Hy 
+
+            term1 = np.outer(s,s.T)
+            term2 = np.outer(Hy, Hy.T)
+
+            return H_prev + term1/denom1 - term2/denom2
+  
 
 
 class BFGS(Quasi_Newton):
@@ -316,10 +352,6 @@ class BFGS(Quasi_Newton):
     def __init__(self, problem, x0, alpha0, tol, line_search):
         super ().__init__ (problem, x0, alpha0, tol, line_search)
 
-        #self.s = None  #### need?
-        self.H = inv(Hessian(self.f, x0))
-
-
     def inverse_hess(self):
 
         H_prev = self.H.copy()
@@ -330,10 +362,10 @@ class BFGS(Quasi_Newton):
 
             x_prev, x_curr = self.history[-2], self.history[-1]
 
-            if self.df != None:                 # if the Problem comes with an analytic gradient take that, if not approximate with the heloing function gradient()
+            if self.df != None:                 # if the Problem comes with an analytic self.df take that, if not approximate with the heloing function self.df()
                 g_prev, g_curr = self.df(x_prev), self.df(x_curr)
             else:
-                g_prev, g_curr = gradient(self.f, x_prev), gradient(self.f, x_curr)
+                g_prev, g_curr = self.df( x_prev), self.df( x_curr)
 
             gamma = g_curr - g_prev
             delta = x_curr - x_prev
@@ -349,6 +381,9 @@ class BFGS(Quasi_Newton):
             H_curr = H_prev + first_term - second_term
 
             return H_curr
+        
+
+
 
 
 
